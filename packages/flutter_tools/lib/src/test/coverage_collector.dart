@@ -19,7 +19,9 @@ import 'watcher.dart';
 class CoverageCollector extends TestWatcher {
   CoverageCollector({
       this.libraryNames, this.verbose = true, required this.packagesPath,
-      this.resolver, this.testTimeRecorder, this.branchCoverage = false});
+      this.resolver, this.testTimeRecorder, this.branchCoverage = false}){
+        _loadExclusionPatterns();
+      }
 
   /// True when log messages should be emitted.
   final bool verbose;
@@ -44,6 +46,29 @@ class CoverageCollector extends TestWatcher {
   /// Whether to collect branch coverage information.
   bool branchCoverage;
 
+  List<String> _exclusionPatterns = <String>[];
+
+  Future<void> _loadExclusionPatterns() async {
+    const String configFilePath = '.flutter_coverage_exclude'; // The config file name
+    final File configFile = globals.fs.file(configFilePath);
+    if (await configFile.exists()) {
+      final List<String> lines = await configFile.readAsLines();
+      _exclusionPatterns = lines.where((String line) => line.isNotEmpty && !line.startsWith('#')).toList();
+    }
+  }
+
+  bool _matchesAnyPattern(String path) {
+    final RegExp escapeDot = RegExp(r'\.');
+    for (final String pattern in _exclusionPatterns) {
+      final String regexString = pattern.replaceAll(escapeDot, r'\.') .replaceAll('*', '.*');
+      final RegExp regex = RegExp('^$regexString\$');
+      if (regex.hasMatch(path)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static Future<coverage.Resolver> getResolver(String? packagesPath) async {
     try {
       return await coverage.Resolver.create(packagesPath: packagesPath);
@@ -58,6 +83,13 @@ class CoverageCollector extends TestWatcher {
   Future<void> handleFinishedTest(TestDevice testDevice) async {
     _logMessage('Starting coverage collection');
     await collectCoverage(testDevice);
+
+    // Filter the global hitmap based on exclusion patterns
+    if (_globalHitmap != null) {
+      _globalHitmap = Map<String, coverage.HitMap> .fromEntries(_globalHitmap!.entries.where(
+        (MapEntry<String, coverage.HitMap> entry) => !_matchesAnyPattern(entry.key)
+      ));
+    }
   }
 
   void _logMessage(String line, { bool error = false }) {
@@ -192,6 +224,9 @@ class CoverageCollector extends TestWatcher {
     if (_globalHitmap == null) {
       return null;
     }
+
+    _filterExcludedPathsFromHitmap();
+
     if (formatter == null) {
       final coverage.Resolver usedResolver = resolver ?? this.resolver ?? await CoverageCollector.getResolver(packagesPath);
       final String packagePath = globals.fs.currentDirectory.path;
@@ -260,6 +295,16 @@ class CoverageCollector extends TestWatcher {
       }
     }
     return true;
+  }
+
+  void _filterExcludedPathsFromHitmap() {
+    final Map<String, coverage.HitMap> filteredHitmap = <String, coverage.HitMap>{};
+    _globalHitmap?.forEach((String filePath, coverage.HitMap hitMap) {
+      if (!_matchesAnyPattern(filePath)) {
+        filteredHitmap[filePath] = hitMap;
+      }
+    });
+    _globalHitmap = filteredHitmap;
   }
 
   @override
